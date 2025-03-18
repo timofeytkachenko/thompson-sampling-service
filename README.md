@@ -1,21 +1,23 @@
 # Thompson Sampling Ad Service
 
-A high-performance microservice for optimizing advertisement selection using Thompson Sampling - a Bayesian approach to the multi-armed bandit problem. This service dynamically allocates traffic to better-performing ad variants based on real-time click-through rates.
+A high-performance microservice for optimizing advertisement selection using Thompson Sampling - a Bayesian approach to the multi-armed bandit problem. This service dynamically allocates traffic to better-performing ad variants based on real-time click-through rates and includes a warmup phase to ensure fair initial exposure.
 
 ## Features
 
 - **Bayesian A/B Testing**: Uses Thompson Sampling to efficiently balance exploration and exploitation of ad variants
+- **Warmup Phase**: Ensures each ad variant receives minimum exposure before optimization begins
 - **Real-time Optimization**: Continuously learns and adapts traffic allocation based on user interactions
 - **Early Experiment Termination**: Automatically detects winning variants with statistical confidence
+- **Winner Respect**: Option to always serve the winning variant once determined
 - **RESTful API**: Comprehensive endpoints for managing experiments and collecting metrics
-- **Simulation Tools**: Includes tools for traffic simulation and visualization
+- **Advanced Simulation Tool**: Includes tools for traffic simulation and visualization with detailed phase analysis
 - **Redis Backend**: Fast, in-memory storage for high throughput
 
 ## Technology Stack
 
 - **Python 3.8+**
 - **FastAPI**: Modern, high-performance web framework
-- **Redis**: In-memory data storage
+- **Redis Async**: In-memory data storage with async support
 - **NumPy**: For statistical computations
 - **Uvicorn**: ASGI server
 - **Matplotlib & Seaborn**: For data visualization in the simulation tool
@@ -26,7 +28,7 @@ A high-performance microservice for optimizing advertisement selection using Tho
 
 ```bash
 # Clone the repository
-git clone git@github.com:yourusername/thompson-sampling-service.git
+git clone git@github.com:timofeytkachenko/thompson-sampling-service.git
 cd thompson-sampling-service
 
 # Build and start the services
@@ -79,13 +81,13 @@ curl -X POST http://localhost:8000/ads \
 ```bash
 curl -X PUT http://localhost:8000/experiment/config \
   -H "Content-Type: application/json" \
-  -d '{"min_samples": 1000, "confidence_threshold": 0.95, "simulation_count": 10000}'
+  -d '{"min_samples": 1000, "confidence_threshold": 0.95, "simulation_count": 10000, "warmup_impressions": 100}'
 ```
 
 3. **Select Advertisements**
 
 ```bash
-# Select an ad (Thompson Sampling)
+# Select an ad (Thompson Sampling with warmup phase)
 curl http://localhost:8000/ads/select
 ```
 
@@ -107,18 +109,21 @@ curl http://localhost:8000/experiment/status
 
 ## How It Works
 
-### Thompson Sampling Algorithm
+### Thompson Sampling with Warmup Phase
 
-Thompson Sampling is a Bayesian approach to the multi-armed bandit problem:
+The service implements Thompson Sampling with an initial warmup phase to ensure fair evaluation:
 
-1. Each ad variant is modeled with a Beta distribution (Beta(α, β))
-2. Initially, all ads start with α=1, β=1 (uniform distribution)
-3. When an ad is clicked, its α parameter increments by 1
-4. When an ad is not clicked, its β parameter increments by 1
-5. To select an ad, we:
-   - Sample a random value from each ad's Beta distribution
-   - Select the ad with the highest sampled value
-6. Over time, the distribution for better-performing ads shifts to the right, increasing their selection probability
+1. **Warmup Phase**: Each ad receives a minimum number of impressions (configurable) to build initial statistics
+2. **Thompson Sampling Algorithm**:
+   - Each ad variant is modeled with a Beta distribution (Beta(α, β))
+   - Initially, all ads start with α=1, β=1 (uniform distribution)
+   - When an ad is clicked, its α parameter increments by 1
+   - When an ad is not clicked, its β parameter increments by 1
+   - To select an ad, we:
+     - Sample a random value from each ad's Beta distribution
+     - Select the ad with the highest sampled value
+3. **Winner Detection**: When an ad's probability of being best exceeds the confidence threshold, it can be declared the winner
+4. **Winner Respect**: If configured, only the winning ad will be served after it's determined
 
 ### Monte Carlo Simulation
 
@@ -151,6 +156,8 @@ This service uses Monte Carlo simulation to determine the probability of each ad
 | `/experiment/config` | PUT | Update experiment configuration |
 | `/experiment/status` | GET | Get experiment status |
 | `/experiment/winner` | GET | Get winning advertisement if available |
+| `/experiment/winner/reset` | DELETE | Reset the stored experiment winner |
+| `/experiment/warmup/status` | GET | Get the current status of the warmup phase |
 
 ### Miscellaneous
 
@@ -172,17 +179,49 @@ python simulation.py --base-url http://localhost:8000 \
   --total-requests 50000 \
   --min-samples 2000 \
   --confidence-threshold 0.98 \
-  --output "my_simulation_results.png"
+  --warmup 500 \
+  --output-prefix "my_simulation_results" \
+  --respect-winner true
 
 # Use a custom configuration file
 python simulation.py --config my_simulation_config.json
 ```
 
-The simulation tool generates detailed visualizations showing:
-- Cumulative impressions by ad
-- Rolling CTR with confidence intervals
-- CTR convergence over time
-- Ad selection distribution
+### Simulation Features
+
+The enhanced simulator provides detailed analysis and visualizations of the experiment:
+
+- **Phase Analysis**: Tracks warmup, testing, and post-winner phases
+- **Selection Method Distribution**: Monitors how ads are selected throughout the experiment
+- **Multiple Visualizations**:
+  - Cumulative impressions by ad
+  - Rolling CTR with confidence intervals
+  - CTR convergence over time
+  - Ad selection distribution
+  - Probability evolution charts
+  - Experiment status tracking
+- **Detailed Reports**: Generates comprehensive logs and statistics
+- **File Outputs**: Saves charts, raw data, and summary information
+
+All results are saved to the `my_results` directory with subdirectories for logs, charts, and data.
+
+### Simulation Configuration
+
+You can configure the simulation with the following parameters:
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--base-url` | URL of the Thompson Sampling service | http://localhost:8000 |
+| `--total-requests` | Total number of requests to simulate | 10000 |
+| `--min-samples` | Minimum samples before stopping | 1000 |
+| `--confidence-threshold` | Confidence threshold for winner | 0.95 |
+| `--warmup` | Impressions per ad during warmup | 500 |
+| `--respect-winner` | Whether to show only winner after determination | true |
+| `--ads` | Number of test ads to create (3-5) | 3 |
+| `--check-interval` | Frequency of status checks | 100 |
+| `--output-prefix` | Prefix for output files | thompson |
+| `--no-visualization` | Disable visualization generation | false |
+| `--config` | Path to JSON configuration file | None |
 
 ## Contributing
 Author: [Timofey Tkachenko](https://linktr.ee/timofey_tkachenko)

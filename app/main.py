@@ -1,14 +1,16 @@
-import json
+import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
-from typing import Dict, List, Optional, Tuple, Union
+from typing import AsyncGenerator, Dict, List, Optional
 
 import numpy as np
 import redis.asyncio as redis
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from redis.exceptions import BusyLoadingError, ConnectionError
 
 # Configure logging
 logging.basicConfig(
@@ -59,6 +61,9 @@ class ExperimentConfig(BaseModel):
     simulation_count: int = Field(
         10000, description="Number of simulations for Monte Carlo estimation"
     )
+    warmup_impressions: int = Field(
+        100, description="Number of impressions per ad during warmup phase"
+    )
 
 
 class ExperimentStatus(BaseModel):
@@ -69,23 +74,27 @@ class ExperimentStatus(BaseModel):
     confidence: float
     min_samples_reached: bool
     total_impressions: int
+    in_warmup_phase: bool
     recommendation: str
 
 
 # Redis connection
-async def get_redis() -> redis.Redis:
+async def get_redis() -> AsyncGenerator[redis.Redis, None]:
     """
     Get Redis connection from pool.
 
-    Returns:
-        redis.Redis: Redis connection
+    This function is designed to be used with FastAPI's dependency injection
+    to automatically close the connection when done.
+
+    Yields:
+        redis.Redis: Redis connection from the pool
     """
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     r = await redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
     try:
-        yield r
+        yield r  # Yields the Redis connection to the caller
     finally:
-        await r.aclose()
+        await r.aclose()  # Ensures connection is closed after use
 
 
 # Lifespan event to initialize Redis connection
@@ -95,7 +104,46 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up the application")
     # Initialize experiment config with default values if not exists
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    r = await redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+
+    # Connect to Redis with retry mechanism for BusyLoadingError
+    r = None
+    max_retries = 5
+    retry_delay = 1.0  # seconds
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = await redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+            await r.ping()  # Test the connection
+            logger.info(f"Successfully connected to Redis after {attempt} attempt(s)")
+            break
+        except BusyLoadingError:
+            if attempt < max_retries:
+                logger.warning(
+                    f"Redis is loading dataset. Retrying in {retry_delay}s (attempt {attempt}/{max_retries})"
+                )
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 1.5  # Exponential backoff
+            else:
+                logger.error(
+                    "Failed to connect to Redis: Redis is still loading dataset after maximum retries"
+                )
+                raise
+        except ConnectionError as e:
+            if attempt < max_retries:
+                logger.warning(
+                    f"Redis connection error: {e}. Retrying in {retry_delay}s (attempt {attempt}/{max_retries})"
+                )
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 1.5  # Exponential backoff
+            else:
+                logger.error(
+                    f"Failed to connect to Redis after {max_retries} attempts: {e}"
+                )
+                raise
+
+    if r is None:
+        logger.error("Failed to establish Redis connection")
+        raise RuntimeError("Failed to establish Redis connection")
 
     # Set default experiment config if not exists
     if not await r.exists("experiment_config"):
@@ -106,6 +154,7 @@ async def lifespan(app: FastAPI):
                 "min_samples": str(default_config.min_samples),
                 "confidence_threshold": str(default_config.confidence_threshold),
                 "simulation_count": str(default_config.simulation_count),
+                "warmup_impressions": str(default_config.warmup_impressions),
             },
         )
 
@@ -117,11 +166,78 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI application
 app = FastAPI(
-    title="Thompson Sampling Ad Service",
-    description="A microservice that uses Thompson Sampling for advertisement testing",
+    title="Thompson Sampling Ad Service with Warmup",
+    description="A microservice that uses Thompson Sampling with warmup phase for advertisement testing",
     version="1.0.0",
     lifespan=lifespan,
 )
+
+
+# Helper functions for winner persistence
+async def get_stored_winner(r: redis.Redis) -> Optional[Dict]:
+    """
+    Get the stored experiment winner from Redis.
+
+    Args:
+        r (redis.Redis): Redis connection
+
+    Returns:
+        Optional[Dict]: Winner information or None if no winner is stored
+    """
+    winner_data = await r.hgetall("experiment:winner")
+
+    if not winner_data:
+        return None
+
+    return {
+        "ad_id": winner_data.get("ad_id"),
+        "name": winner_data.get("name"),
+        "confidence": float(winner_data.get("confidence", 0)),
+        "timestamp": int(winner_data.get("timestamp", 0)),
+        "impressions": int(winner_data.get("impressions", 0)),
+        "clicks": int(winner_data.get("clicks", 0)),
+        "ctr": float(winner_data.get("ctr", 0)),
+    }
+
+
+async def set_experiment_winner(
+    r: redis.Redis, winning_ad: AdvertisementStats, confidence: float
+) -> bool:
+    """
+    Store the winning advertisement in Redis.
+
+    Args:
+        r (redis.Redis): Redis connection
+        winning_ad (AdvertisementStats): The winning advertisement
+        confidence (float): Confidence level
+
+    Returns:
+        bool: True if winner was set, False otherwise
+    """
+    if not winning_ad:
+        return False
+
+    # Get the current timestamp
+    timestamp = int(time.time())
+
+    # Store winner information in Redis
+    await r.hset(
+        "experiment:winner",
+        mapping={
+            "ad_id": winning_ad.id,
+            "name": winning_ad.name,
+            "confidence": str(confidence),
+            "timestamp": str(timestamp),
+            "impressions": str(winning_ad.impressions),
+            "clicks": str(winning_ad.clicks),
+            "ctr": str(winning_ad.ctr),
+        },
+    )
+
+    logger.info(
+        f"Set experiment winner: {winning_ad.id} with confidence {confidence:.2f}"
+    )
+    return True
 
 
 # Helper functions
@@ -226,12 +342,14 @@ async def get_experiment_config(r: redis.Redis) -> ExperimentConfig:
         min_samples=int(config_data.get("min_samples", 1000)),
         confidence_threshold=float(config_data.get("confidence_threshold", 0.95)),
         simulation_count=int(config_data.get("simulation_count", 10000)),
+        warmup_impressions=int(config_data.get("warmup_impressions", 100)),
     )
 
 
 async def check_experiment_status(r: redis.Redis) -> ExperimentStatus:
     """
     Check if the experiment can be stopped based on configured criteria.
+    If criteria are met, store the winner in Redis.
 
     Args:
         r (redis.Redis): Redis connection
@@ -239,6 +357,46 @@ async def check_experiment_status(r: redis.Redis) -> ExperimentStatus:
     Returns:
         ExperimentStatus: Status of the experiment
     """
+    # First check if we already have a winner stored
+    stored_winner = await get_stored_winner(r)
+
+    if stored_winner:
+        # We have a previously determined winner
+        ad_id = stored_winner["ad_id"]
+
+        # Get ad data
+        ad_data = await r.hgetall(f"ad:{ad_id}")
+        if not ad_data:
+            logger.error(f"Stored winner ad {ad_id} not found in database")
+            # Continue with normal experiment status check
+        else:
+            impressions = int(ad_data.get("impressions", 0))
+            clicks = int(ad_data.get("clicks", 0))
+            ctr = clicks / impressions if impressions > 0 else 0
+
+            winning_ad = AdvertisementStats(
+                id=ad_id,
+                name=ad_data.get("name", stored_winner["name"]),
+                impressions=impressions,
+                clicks=clicks,
+                alpha=float(ad_data.get("alpha", 1.0)),
+                beta=float(ad_data.get("beta", 1.0)),
+                ctr=ctr,
+                probability_best=float(
+                    ad_data.get("probability_best", 1.0)
+                ),  # Winner has 100% probability
+            )
+
+            return ExperimentStatus(
+                can_stop=True,
+                winning_ad=winning_ad,
+                confidence=stored_winner["confidence"],
+                min_samples_reached=True,
+                total_impressions=impressions,
+                in_warmup_phase=False,
+                recommendation=f"Experiment already concluded. Advertisement '{winning_ad.name}' is the winner with {stored_winner['confidence']:.1%} confidence.",
+            )
+
     # Get ads and config
     ads = await get_all_ads(r)
     config = await get_experiment_config(r)
@@ -249,8 +407,12 @@ async def check_experiment_status(r: redis.Redis) -> ExperimentStatus:
             confidence=0.0,
             min_samples_reached=False,
             total_impressions=0,
+            in_warmup_phase=False,
             recommendation="No advertisements available for testing",
         )
+
+    # Check if in warmup phase
+    in_warmup_phase = any(ad.impressions < config.warmup_impressions for ad in ads)
 
     # Check if all ads have minimum sample size
     total_impressions = sum(ad.impressions for ad in ads)
@@ -264,8 +426,8 @@ async def check_experiment_status(r: redis.Redis) -> ExperimentStatus:
         await r.hset(f"ad:{ad_id}", "probability_best", str(prob))
 
     # Find ad with highest probability
-    best_ad_id = max(probabilities, key=probabilities.get)
-    best_probability = probabilities[best_ad_id]
+    best_ad_id = max(probabilities, key=probabilities.get) if probabilities else None
+    best_probability = probabilities.get(best_ad_id, 0) if best_ad_id else 0
 
     # Update ad objects with probabilities
     for ad in ads:
@@ -275,14 +437,28 @@ async def check_experiment_status(r: redis.Redis) -> ExperimentStatus:
     winning_ad = next((ad for ad in ads if ad.id == best_ad_id), None)
 
     # Determine if experiment can be stopped
-    can_stop = min_samples_reached and best_probability >= config.confidence_threshold
+    # Must be out of warmup phase, have minimum samples, and meet confidence threshold
+    can_stop = (
+        (not in_warmup_phase)
+        and min_samples_reached
+        and best_probability >= config.confidence_threshold
+    )
+
+    # If experiment can be stopped, store the winner
+    if can_stop and winning_ad:
+        await set_experiment_winner(r, winning_ad, best_probability)
 
     # Generate recommendation
-    if can_stop:
+    if in_warmup_phase:
+        remaining_warmup = sum(
+            max(0, config.warmup_impressions - ad.impressions) for ad in ads
+        )
+        recommendation = f"In warmup phase. Need approximately {remaining_warmup} more impressions to complete warmup."
+    elif can_stop:
         recommendation = f"Experiment can be stopped. Advertisement '{winning_ad.name}' is the winner with {best_probability:.1%} confidence."
     elif not min_samples_reached:
-        remaining_impressions = max(
-            0, config.min_samples * len(ads) - total_impressions
+        remaining_impressions = sum(
+            max(0, config.min_samples - ad.impressions) for ad in ads
         )
         recommendation = f"Continue testing. Need approximately {remaining_impressions} more impressions to reach minimum sample size."
     else:
@@ -294,6 +470,7 @@ async def check_experiment_status(r: redis.Redis) -> ExperimentStatus:
         confidence=best_probability,
         min_samples_reached=min_samples_reached,
         total_impressions=total_impressions,
+        in_warmup_phase=in_warmup_phase,
         recommendation=recommendation,
     )
 
@@ -357,6 +534,7 @@ async def select_ad(
 ) -> Dict:
     """
     Select an advertisement using Thompson Sampling or return the winning ad if experiment can be stopped.
+    During warmup phase, ads are selected uniformly to ensure each gets minimum exposure.
 
     Args:
         respect_winner (bool): Whether to return the winning ad if experiment can be stopped
@@ -365,8 +543,40 @@ async def select_ad(
     Returns:
         Dict: Selected advertisement with content
     """
-    # Check if experiment can be stopped and we should respect the winner
+    # Get all ads
+    ads = await get_all_ads(r)
+
+    if not ads:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No advertisements available"
+        )
+
+    # First check if we should respect the winner and if a winner exists
     if respect_winner:
+        stored_winner = await get_stored_winner(r)
+
+        if stored_winner:
+            # We have a stored winner, return it
+            ad_id = stored_winner["ad_id"]
+
+            # Get ad content
+            content = await r.hget(f"ad:{ad_id}", "content")
+
+            # Record impression
+            await r.hincrby(f"ad:{ad_id}", "impressions", 1)
+            await r.hincrbyfloat(
+                f"ad:{ad_id}", "beta", 1.0
+            )  # Assume no click initially
+
+            logger.info(f"Selected stored winner advertisement: {ad_id}")
+            return {
+                "id": ad_id,
+                "name": stored_winner["name"],
+                "content": content,
+                "selection_method": "winning_ad",
+            }
+
+        # No stored winner, check if experiment can be stopped now
         experiment_status = await check_experiment_status(r)
         if experiment_status.can_stop and experiment_status.winning_ad:
             # Return the winning ad
@@ -374,6 +584,9 @@ async def select_ad(
 
             # Record impression
             await r.hincrby(f"ad:{selected_ad.id}", "impressions", 1)
+            await r.hincrbyfloat(
+                f"ad:{selected_ad.id}", "beta", 1.0
+            )  # Assume no click initially
 
             # Get content
             content = await r.hget(f"ad:{selected_ad.id}", "content")
@@ -386,15 +599,34 @@ async def select_ad(
                 "selection_method": "winning_ad",
             }
 
-    # Otherwise use Thompson Sampling
-    ads = await get_all_ads(r)
+    # Get config for warmup check
+    config = await get_experiment_config(r)
 
-    if not ads:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="No advertisements available"
-        )
+    # Check if we're in warmup phase for any ad
+    ads_in_warmup = [ad for ad in ads if ad.impressions < config.warmup_impressions]
 
-    # Thompson Sampling - sample from beta distribution for each ad
+    if ads_in_warmup:
+        # Select ad with least impressions during warmup to ensure even distribution
+        selected_ad = min(ads_in_warmup, key=lambda a: a.impressions)
+
+        # Record impression
+        await r.hincrby(f"ad:{selected_ad.id}", "impressions", 1)
+        await r.hincrbyfloat(
+            f"ad:{selected_ad.id}", "beta", 1.0
+        )  # Assume no click initially
+
+        # Get content
+        content = await r.hget(f"ad:{selected_ad.id}", "content")
+
+        logger.info(f"Selected advertisement (warmup phase): {selected_ad.id}")
+        return {
+            "id": selected_ad.id,
+            "name": selected_ad.name,
+            "content": content,
+            "selection_method": "warmup_phase",
+        }
+
+    # Otherwise use Thompson Sampling - sample from beta distribution for each ad
     max_sample = -1
     selected_ad = None
 
@@ -410,11 +642,14 @@ async def select_ad(
 
     # Record impression
     await r.hincrby(f"ad:{selected_ad.id}", "impressions", 1)
+    await r.hincrbyfloat(
+        f"ad:{selected_ad.id}", "beta", 1.0
+    )  # Assume no click initially
 
     # Get content
     content = await r.hget(f"ad:{selected_ad.id}", "content")
 
-    logger.info(f"Selected advertisement: {selected_ad.id}")
+    logger.info(f"Selected advertisement (thompson sampling): {selected_ad.id}")
     return {
         "id": selected_ad.id,
         "name": selected_ad.name,
@@ -565,7 +800,7 @@ async def get_ad(ad_id: str, r: redis.Redis = Depends(get_redis)) -> Advertiseme
 
 
 @app.get("/experiment/status")
-async def get_experiment_status(
+async def get_experiment_status_endpoint(
     r: redis.Redis = Depends(get_redis),
 ) -> ExperimentStatus:
     """
@@ -578,45 +813,6 @@ async def get_experiment_status(
         ExperimentStatus: Status of the experiment
     """
     return await check_experiment_status(r)
-
-
-@app.get("/experiment/winner")
-async def get_experiment_winner(r: redis.Redis = Depends(get_redis)) -> Dict:
-    """
-    Get the winning advertisement if experiment can be stopped.
-
-    Args:
-        r (redis.Redis): Redis connection
-
-    Returns:
-        Dict: Winning advertisement data or error message
-    """
-    status = await check_experiment_status(r)
-
-    if not status.can_stop:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Experiment cannot be stopped yet. {status.recommendation}",
-        )
-
-    if not status.winning_ad:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No winning advertisement found",
-        )
-
-    # Get content
-    content = await r.hget(f"ad:{status.winning_ad.id}", "content")
-
-    return {
-        "id": status.winning_ad.id,
-        "name": status.winning_ad.name,
-        "content": content,
-        "confidence": status.confidence,
-        "ctr": status.winning_ad.ctr,
-        "impressions": status.winning_ad.impressions,
-        "clicks": status.winning_ad.clicks,
-    }
 
 
 @app.put("/experiment/config")
@@ -639,6 +835,7 @@ async def update_experiment_config(
             "min_samples": str(config.min_samples),
             "confidence_threshold": str(config.confidence_threshold),
             "simulation_count": str(config.simulation_count),
+            "warmup_impressions": str(config.warmup_impressions),
         },
     )
 
@@ -700,8 +897,169 @@ async def reset_all_ads(r: redis.Redis = Depends(get_redis)) -> Dict:
     # Reset counter
     await r.set("ad_counter", 0)
 
+    # Also reset any stored winner
+    await r.delete("experiment:winner")
+
     logger.info("Reset all advertisements")
     return {"message": "All advertisements deleted successfully"}
+
+
+@app.get("/experiment/winner")
+async def get_experiment_winner_endpoint(r: redis.Redis = Depends(get_redis)) -> Dict:
+    """
+    Get the winning advertisement if experiment can be stopped.
+
+    Args:
+        r (redis.Redis): Redis connection
+
+    Returns:
+        Dict: Winning advertisement data or error message
+    """
+    # First check if we have a stored winner
+    stored_winner = await get_stored_winner(r)
+
+    if stored_winner:
+        # We have a previously determined winner
+        ad_id = stored_winner["ad_id"]
+
+        # Check if ad still exists
+        exists = await r.sismember("ads", ad_id)
+        if not exists:
+            # Ad has been deleted, but we still have a winner
+            return {
+                "id": ad_id,
+                "name": stored_winner["name"],
+                "content": "Advertisement content not available (ad deleted)",
+                "confidence": stored_winner["confidence"],
+                "ctr": stored_winner["ctr"],
+                "impressions": stored_winner["impressions"],
+                "clicks": stored_winner["clicks"],
+                "warning": "The winning ad has been deleted from the system",
+            }
+
+        # Get content
+        content = await r.hget(f"ad:{ad_id}", "content")
+        if content is None:
+            content = "Content not available"
+
+        return {
+            "id": ad_id,
+            "name": stored_winner["name"],
+            "content": content,
+            "confidence": stored_winner["confidence"],
+            "ctr": stored_winner["ctr"],
+            "impressions": stored_winner["impressions"],
+            "clicks": stored_winner["clicks"],
+        }
+
+    # No stored winner, check experiment status
+    status = await check_experiment_status(r)
+
+    if not status.can_stop:
+        detail_message = (
+            f"Experiment cannot be stopped yet. {status.recommendation} "
+            f"In warmup: {status.in_warmup_phase}, Min samples reached: {status.min_samples_reached}, "
+            f"Total impressions: {status.total_impressions}, Best confidence: {status.confidence:.2f}"
+        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail_message)
+
+    if not status.winning_ad:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No winning advertisement found",
+        )
+
+    # Get content
+    content = await r.hget(f"ad:{status.winning_ad.id}", "content")
+    if content is None:
+        content = "Content not available"
+
+    return {
+        "id": status.winning_ad.id,
+        "name": status.winning_ad.name,
+        "content": content,
+        "confidence": status.confidence,
+        "ctr": status.winning_ad.ctr,
+        "impressions": status.winning_ad.impressions,
+        "clicks": status.winning_ad.clicks,
+    }
+
+
+@app.delete("/experiment/winner/reset")
+async def reset_experiment_winner(r: redis.Redis = Depends(get_redis)) -> Dict:
+    """
+    Reset (delete) the stored experiment winner.
+
+    Args:
+        r (redis.Redis): Redis connection
+
+    Returns:
+        Dict: Confirmation message
+    """
+    # Check if winner exists before deleting
+    winner_data = await r.hgetall("experiment:winner")
+    if not winner_data:
+        # No winner found, return appropriate message
+        return {"message": "No experiment winner exists to reset"}
+
+    # Delete the winner
+    await r.delete("experiment:winner")
+
+    logger.info("Reset experiment winner")
+    return {"message": "Experiment winner reset successfully"}
+
+
+@app.get("/experiment/warmup/status")
+async def get_warmup_status(r: redis.Redis = Depends(get_redis)) -> Dict:
+    """
+    Get the current status of the warmup phase.
+
+    Args:
+        r (redis.Redis): Redis connection
+
+    Returns:
+        Dict: Warmup phase status details
+    """
+    ads = await get_all_ads(r)
+    config = await get_experiment_config(r)
+
+    if not ads:
+        return {
+            "in_warmup_phase": False,
+            "message": "No advertisements available",
+            "ads_status": [],
+        }
+
+    ads_status = []
+    for ad in ads:
+        remaining = max(0, config.warmup_impressions - ad.impressions)
+        complete = ad.impressions >= config.warmup_impressions
+
+        ads_status.append(
+            {
+                "id": ad.id,
+                "name": ad.name,
+                "impressions": ad.impressions,
+                "required_warmup": config.warmup_impressions,
+                "remaining": remaining,
+                "warmup_complete": complete,
+            }
+        )
+
+    in_warmup = any(not status["warmup_complete"] for status in ads_status)
+    total_remaining = sum(status["remaining"] for status in ads_status)
+
+    return {
+        "in_warmup_phase": in_warmup,
+        "total_warmup_remaining": total_remaining,
+        "warmup_impressions_per_ad": config.warmup_impressions,
+        "ads_status": ads_status,
+        "message": (
+            "Warmup phase complete"
+            if not in_warmup
+            else f"Warmup phase in progress. {total_remaining} impressions remaining."
+        ),
+    }
 
 
 # Health check

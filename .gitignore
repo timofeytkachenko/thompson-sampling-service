@@ -1,5 +1,6 @@
 .idea/
 __pycache__/
+my_results/
 
 *.log
 *.png
