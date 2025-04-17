@@ -10,6 +10,7 @@ A high-performance microservice for optimizing advertisement selection using Tho
 - **Early Experiment Termination**: Automatically detects winning variants with statistical confidence
 - **Winner Respect**: Option to always serve the winning variant once determined
 - **RESTful API**: Comprehensive endpoints for managing experiments and collecting metrics
+- **Admin Panel**: Streamlit-based web interface for experiment visualization and management
 - **Advanced Simulation Tool**: Includes tools for traffic simulation and visualization with detailed phase analysis
 - **Redis Backend**: Fast, in-memory storage for high throughput
 
@@ -20,6 +21,8 @@ A high-performance microservice for optimizing advertisement selection using Tho
 - **Redis Async**: In-memory data storage with async support
 - **NumPy**: For statistical computations
 - **Uvicorn**: ASGI server
+- **Streamlit**: For the admin dashboard UI
+- **Plotly & Pandas**: For interactive data visualization
 - **Matplotlib & Seaborn**: For data visualization in the simulation tool
 
 ## Installation
@@ -165,6 +168,46 @@ This service uses Monte Carlo simulation to determine the probability of each ad
 |----------|--------|-------------|
 | `/health` | GET | Health check endpoint |
 | `/ads` | DELETE | Reset all advertisements (testing only) |
+
+## Admin Panel
+
+The service includes a Streamlit-based admin panel for visualizing and managing ad experiments through an intuitive web interface.
+
+### Admin Panel Features
+
+- **Real-time Monitoring**: View current experiment status, warmup phase, and ad performance
+- **Interactive Visualizations**: See ad performance metrics with rich, interactive charts:
+  - Impression distribution
+  - Click-through rate comparison
+  - Probability of being the best ad
+  - Beta distribution parameters visualization
+- **Ad Management**: Create new ads and delete existing ones through the UI
+- **Experiment Configuration**: Adjust experiment parameters like minimum samples, confidence threshold, and warmup impressions
+- **Reset Options**: Reset the experiment winner or all ads for starting fresh experiments
+
+### Running the Admin Panel
+
+```bash
+# Install Streamlit and other dependencies
+pip install streamlit pandas plotly requests
+
+# Run the admin panel
+streamlit run app/admin_panel.py
+```
+
+By default, the admin panel connects to the Thompson Sampling service at `http://localhost:8000`. You can specify a different API URL using the `API_BASE_URL` environment variable:
+
+```bash
+API_BASE_URL=http://your-service-url:8000 streamlit run app/admin_panel.py
+```
+
+### Admin Panel UI
+
+The admin panel provides an intuitive dashboard with:
+- Experiment status overview with key metrics
+- Ad performance statistics and visualizations
+- Warmup phase monitoring with progress bars
+- Controls for managing ads and experiment configuration
 
 ## Simulation Tool
 
