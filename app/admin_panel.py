@@ -343,19 +343,29 @@ if exp_status:
 
     st.info(f"**Recommendation:** {recommendation}", icon="💡")
 
-    if winner and isinstance(winner, dict):
+    # Only show success message if experiment CAN be stopped AND a winner is identified
+    if can_stop and winner and isinstance(winner, dict):
         winner_name = winner.get('name', 'N/A')
         winner_id = winner.get('id', 'N/A')
         winner_ctr = winner.get('ctr', 0.0)
+        # Use confidence from the main status, not potentially stale winner dict confidence if stored separately
         st.success(
             f"**Winner Determined:** **'{winner_name}'** (ID: `{winner_id}`) "
             f"with **{confidence:.1%}** confidence. CTR: **{winner_ctr:.3f}**",
             icon="🏆"
         )
     elif can_stop and not winner:
-        st.warning("⚠️ Experiment can be stopped, but no definitive winning ad identified yet (confidence likely borderline or multiple ads very close).")
+        # Handles the edge case where can_stop is true but API didn't return a winner object
+        st.warning(
+            "⚠️ Experiment stopping criteria met, but no specific winning ad identified by the API (check confidence levels).",
+            icon="❓")
     elif not can_stop and not in_warmup:
-        st.info("Experiment running: Minimum samples reached, monitoring for winner confidence.", icon="🏃")
+        # Explicitly state experiment is running post-warmup but hasn't concluded
+        st.info("Experiment running: Monitoring ads to reach confidence threshold or other stopping criteria.",
+                icon="🏃")
+    elif in_warmup:
+        # Message handled by the "In Warmup Phase?" metric and recommendation
+        pass
 
 else:
     # Only show warning if there wasn't a more specific error message already displayed
