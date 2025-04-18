@@ -795,11 +795,6 @@ with st.sidebar.expander("Configure Experiment", expanded=False):
 
 st.sidebar.subheader("💣 Danger Zone")
 with st.sidebar.expander("Reset Options", expanded=False):
-
-    # --- Reset Winner Button Removed ---
-    # The logic previously here has been deleted.
-    # The associated API client function `reset_winner` is also removed.
-
     # --- Reset All Button - Uses single API call now ---
     st.markdown("**Reset ALL Ads & Winner**")
     st.caption("This action uses the `DELETE /ads` endpoint, which deletes all ad data and resets the stored winner in one operation.")

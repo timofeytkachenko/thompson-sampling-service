@@ -154,13 +154,14 @@ This service uses Monte Carlo simulation to determine the probability of each ad
 
 ### Experiment Management
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/experiment/config` | PUT | Update experiment configuration |
-| `/experiment/status` | GET | Get experiment status |
-| `/experiment/winner` | GET | Get winning advertisement if available |
-| `/experiment/winner/reset` | DELETE | Reset the stored experiment winner |
-| `/experiment/warmup/status` | GET | Get the current status of the warmup phase |
+| Endpoint | Method | Description                                |
+|----------|--------|--------------------------------------------|
+| `/experiment/config` | PUT    | Update experiment configuration            |
+| `/experiment/config` | GET    | Get experiment configuration               |
+| `/experiment/status` | GET    | Get experiment status                      |
+| `/experiment/winner` | GET    | Get winning advertisement if available     |
+| `/experiment/winner/reset` | DELETE | Reset the stored experiment winner         |
+| `/experiment/warmup/status` | GET    | Get the current status of the warmup phase |
 
 ### Miscellaneous
 
@@ -183,7 +184,7 @@ The service includes a Streamlit-based admin panel for visualizing and managing 
   - Beta distribution parameters visualization
 - **Ad Management**: Create new ads and delete existing ones through the UI
 - **Experiment Configuration**: Adjust experiment parameters like minimum samples, confidence threshold, and warmup impressions
-- **Reset Options**: Reset the experiment winner or all ads for starting fresh experiments
+- **Reset Options**: Reset the experiment winner and all ads for starting fresh experiments
 
 ### Running the Admin Panel
 
