@@ -846,6 +846,34 @@ async def update_experiment_config(
     }
 
 
+@app.get("/experiment/config", response_model=ExperimentConfig)
+async def get_experiment_config_endpoint(
+    r: redis.Redis = Depends(get_redis),
+) -> ExperimentConfig:
+    """
+    Retrieve the current experiment configuration settings.
+
+    Fetches the configuration values stored in Redis under the 'experiment_config' hash.
+    If the configuration doesn't exist in Redis, it returns the default settings
+    defined in the ExperimentConfig model.
+
+    Parameters
+    ----------
+    r : redis.Redis
+        An asynchronous Redis connection instance obtained via dependency injection.
+
+    Returns
+    -------
+    ExperimentConfig
+        The current experiment configuration settings.
+    """
+    logger.info("Received request to get experiment configuration.")
+    # Reuse the existing helper function which handles fetching from Redis and defaults
+    config = await get_experiment_config(r)
+    logger.info(f"Returning current experiment configuration: {config}")
+    return config
+
+
 @app.delete("/ads/{ad_id}")
 async def delete_ad(ad_id: str, r: redis.Redis = Depends(get_redis)) -> Dict:
     """
