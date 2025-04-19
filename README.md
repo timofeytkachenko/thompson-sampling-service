@@ -16,7 +16,7 @@ A high-performance microservice for optimizing advertisement selection using Tho
 
 ## Technology Stack
 
-- **Python 3.8+**
+- **Python 3.11+**
 - **FastAPI**: Modern, high-performance web framework
 - **Redis Async**: In-memory data storage with async support
 - **NumPy**: For statistical computations
@@ -38,17 +38,28 @@ cd thompson-sampling-service
 docker-compose up -d
 ```
 
+With this setup:
+- FastAPI service is available at http://localhost:8000
+- Admin panel is available at http://localhost:8501
+
 The service uses Docker Compose with the following configuration:
 
 #### Docker Compose Services
 
-- **app**: The main Thompson Sampling service
+- **api**: The main Thompson Sampling service
   - Exposes port 8000 for the API
   - Connects to the Redis instance
   - Includes health checks for reliability
   - Environment variables:
     - `REDIS_URL`: Connection string for Redis
     - `LOG_LEVEL`: Logging verbosity level
+
+- **admin**: The Streamlit admin dashboard
+  - Exposes port 8501 for the web interface
+  - Connects to the API service
+  - Includes health checks
+  - Environment variables:
+    - `API_BASE_URL`: URL to connect to the API service
 
 - **redis**: In-memory database for storing ad statistics
   - Uses Redis 7 Alpine for minimal footprint
@@ -186,21 +197,19 @@ The service includes a Streamlit-based admin panel for visualizing and managing 
 - **Experiment Configuration**: Adjust experiment parameters like minimum samples, confidence threshold, and warmup impressions
 - **Reset Options**: Reset the experiment winner and all ads for starting fresh experiments
 
-### Running the Admin Panel
+### Admin Panel Access
 
-```bash
-# Install Streamlit and other dependencies
-pip install streamlit pandas plotly requests
+The admin panel runs as a separate service within the Docker Compose setup:
 
-# Run the admin panel
-streamlit run app/admin_panel.py
-```
+- **URL**: http://localhost:8501
+- **Running Process**: The Streamlit server runs in a dedicated container named `thompson-admin-panel`
+- **Auto-startup**: The admin panel automatically starts when you run `docker-compose up -d`
+- **Connection to API**: The admin panel connects to the API service at http://api:8000 within the Docker network
+- **No Additional Setup Required**: The admin panel is ready to use as soon as the containers are running
 
-By default, the admin panel connects to the Thompson Sampling service at `http://localhost:8000`. You can specify a different API URL using the `API_BASE_URL` environment variable:
+### Accessing the Admin Panel
 
-```bash
-API_BASE_URL=http://your-service-url:8000 streamlit run app/admin_panel.py
-```
+With the Docker Compose setup, the admin panel is automatically started and available at http://localhost:8501.
 
 ### Admin Panel UI
 

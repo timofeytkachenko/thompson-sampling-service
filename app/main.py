@@ -8,7 +8,6 @@ from typing import AsyncGenerator, Dict, List, Optional
 import numpy as np
 import redis.asyncio as redis
 from fastapi import Depends, FastAPI, HTTPException, Query, status
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from redis.exceptions import BusyLoadingError, ConnectionError
 
@@ -1092,7 +1091,7 @@ async def get_warmup_status(r: redis.Redis = Depends(get_redis)) -> Dict:
 
 # Health check
 @app.get("/health")
-async def health_check(r: redis.Redis = Depends(get_redis)) -> Dict:
+async def health_check(r: redis.Redis = Depends(get_redis)) -> Dict[str, str]:
     """
     Health check endpoint.
 
@@ -1100,17 +1099,19 @@ async def health_check(r: redis.Redis = Depends(get_redis)) -> Dict:
         r (redis.Redis): Redis connection
 
     Returns:
-        Dict: Health status
+        Dict[str, str]: Health status
+
+    Raises:
+        HTTPException: If the health check fails (e.g., Redis connection error).
     """
     try:
-        # Check Redis connection
         await r.ping()
         return {"status": "healthy", "redis": "connected"}
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        return JSONResponse(
+        raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"status": "unhealthy", "redis": str(e)},
+            detail={"status": "unhealthy", "redis": str(e)},
         )
 
 

@@ -1,7 +1,9 @@
 services:
-  app:
-    build: .
-    container_name: thompson-sampling-service
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: thompson-sampling-api
     ports:
       - "8000:8000"
     environment:
@@ -9,13 +11,38 @@ services:
       - LOG_LEVEL=INFO
     restart: unless-stopped
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 5s
+    networks:
+      - thompson-network
+
+  admin:
+    build:
+      context: .
+      dockerfile: Dockerfile.admin
+    container_name: thompson-admin-panel
+    ports:
+      - "8501:8501"
+    environment:
+      - API_BASE_URL=http://api:8000
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    networks:
+      - thompson-network
 
   redis:
     image: redis:7-alpine
@@ -31,7 +58,13 @@ services:
       interval: 5s
       timeout: 3s
       retries: 3
+    networks:
+      - thompson-network
 
 volumes:
   redis_data:
     name: thompson-redis-data
+
+networks:
+  thompson-network:
+    name: thompson-network
