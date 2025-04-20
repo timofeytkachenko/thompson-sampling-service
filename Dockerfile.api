@@ -1,26 +1,55 @@
-FROM python:3.11-slim
+FROM python:3.13.3-slim
 
-WORKDIR /app
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+ENV APP_HOME /app
+ENV LOG_DIR=${APP_HOME}/logs
 
-# Install curl for healthchecks
+WORKDIR ${APP_HOME}
+
+# Create a non-root user and group
+# Using fixed UID/GID is good practice for consistency
+RUN groupadd --gid 1001 appgroup && \
+    useradd --uid 1001 --gid 1001 --shell /bin/bash --create-home appuser
+
+# Install system dependencies (curl for healthcheck)
+# Combine RUN commands to reduce layers
 RUN apt-get update && \
     apt-get install -y --no-install-recommends curl && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy requirements file first for better caching
-COPY requirements.txt .
+# Create log directory and set permissions before switching user
+RUN mkdir -p ${LOG_DIR} && \
+    chown -R appuser:appgroup ${LOG_DIR} && \
+    chmod -R 750 ${LOG_DIR} # Give group write access if needed, else 750 or 700
+
+# Copy requirements first for layer caching
+COPY --chown=appuser:appgroup requirements.txt .
+# Install Python dependencies as the app user (build happens as root still)
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the application code
-COPY app /app
+# Copy application code and set permissions
+# Copy after pip install to leverage cache better
+COPY --chown=appuser:appgroup app ${APP_HOME}
 
-# Expose the port the app will run on
+# Switch to the non-root user
+USER appuser
+
+# Expose the port the app runs on
 EXPOSE 8000
 
-# Set healthcheck
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+# Healthcheck (curl should still work as appuser)
+# Ensure the API doesn't require root privileges to respond to /health
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
   CMD curl -f http://localhost:8000/health || exit 1
 
-# Run the FastAPI application
+# Run the application
+# Use Gunicorn for production runs - more robust than uvicorn directly
+# Install Gunicorn via requirements.txt or add a pip install step
+# Example using uvicorn worker with gunicorn:
+# CMD ["gunicorn", "main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000"]
+# Or stick with uvicorn for simplicity if preferred:
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Use --log-config /dev/null to prevent uvicorn's default handlers interfering with our custom setup

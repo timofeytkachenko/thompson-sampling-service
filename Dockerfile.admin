@@ -1,29 +1,50 @@
-FROM python:3.11-slim
+FROM python:3.13.3-slim
 
-WORKDIR /app
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+ENV APP_HOME /app
+ENV LOG_DIR=${APP_HOME}/logs
+# Default API endpoint (can be overridden in docker-compose)
+ENV API_BASE_URL=http://api:8000
 
-# Install curl for healthchecks
+WORKDIR ${APP_HOME}
+
+# Create a non-root user and group
+RUN groupadd --gid 1001 appgroup && \
+    useradd --uid 1001 --gid 1001 --shell /bin/bash --create-home appuser
+
+# Install system dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends curl && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy requirements file first for better caching
-COPY requirements.txt .
+# Create log directory and set permissions
+RUN mkdir -p ${LOG_DIR} && \
+    chown -R appuser:appgroup ${LOG_DIR} && \
+    chmod -R 750 ${LOG_DIR}
+
+# Copy requirements first for layer caching
+COPY --chown=appuser:appgroup requirements.txt .
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the application code
-COPY app /app
+# Copy application code and set permissions
+COPY --chown=appuser:appgroup app ${APP_HOME}
 
-# Default API endpoint (can be overridden in docker-compose)
-ENV API_BASE_URL=http://api:8000
+# Switch to the non-root user
+USER appuser
 
-# Expose the port the app will run on
+# Expose the port the app runs on
 EXPOSE 8501
 
-# Set healthcheck
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+# Healthcheck for Streamlit
+# Streamlit's internal health endpoint is typically _stcore/health
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
   CMD curl -f http://localhost:8501/_stcore/health || exit 1
 
 # Run the Streamlit application
-CMD ["streamlit", "run", "admin_panel.py", "--server.port=8501", "--server.address=0.0.0.0"]
+# Streamlit handles its own logging, but our setup captures root logger output too
+CMD ["streamlit", "run", "admin_panel.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.fileWatcherType=none"]
+# --server.fileWatcherType=none is recommended in Docker

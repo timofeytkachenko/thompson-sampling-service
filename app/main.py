@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import logging.handlers
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Dict, List, Optional
@@ -11,12 +13,59 @@ from fastapi import Depends, FastAPI, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from redis.exceptions import BusyLoadingError, ConnectionError
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
+# --- Logging Configuration ---
+LOG_DIR = os.getenv("LOG_DIR", "/app/logs")  # Default log directory
+LOG_FILE_API = os.path.join(LOG_DIR, "api.log")
+MAX_LOG_SIZE_MB = 10  # Max size in MB before rotation
+BACKUP_COUNT = 5  # Number of backup log files to keep
+
+
+def setup_logging(log_file_path: str) -> None:
+    """
+    Configures file-based rotating logging and stream logging.
+
+    Parameters
+    ----------
+    log_file_path : str
+        The full path to the log file.
+    """
+    log_formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(process)d - %(threadName)s - %(message)s"
+    )
+    log_level = logging.INFO
+
+    # Ensure log directory exists
+    os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
+
+    # Rotating File Handler
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file_path,
+        maxBytes=MAX_LOG_SIZE_MB * 1024 * 1024,
+        backupCount=BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(log_formatter)
+
+    # Stream Handler (for console output, useful with Docker logs)
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(log_formatter)
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(stream_handler)
+
+    # Set library log levels if needed (e.g., reduce verbosity)
+    logging.getLogger("uvicorn.error").propagate = False
+    logging.getLogger("uvicorn.access").propagate = False
+    logging.getLogger("uvicorn").addHandler(file_handler)
+    logging.getLogger("uvicorn").addHandler(stream_handler)
+
+
+# Call logging setup early
+setup_logging(LOG_FILE_API)
+logger = logging.getLogger(__name__)  # Get logger after setup
 
 
 # Models

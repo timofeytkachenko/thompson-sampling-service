@@ -1,6 +1,8 @@
 import datetime
 import logging
+import logging.handlers
 import os
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -12,6 +14,7 @@ from requests.exceptions import ConnectionError, RequestException
 
 load_dotenv()
 
+
 # --- Configuration ---
 st.set_page_config(
     page_title="Thompson Sampling Admin",
@@ -22,10 +25,57 @@ st.set_page_config(
 API_BASE_URL_DEFAULT = "http://localhost:8000"
 API_BASE_URL = os.environ.get("API_BASE_URL", API_BASE_URL_DEFAULT)
 
-# Configure basic logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
+
+# --- Logging Configuration ---
+LOG_DIR = os.getenv("LOG_DIR", "/app/logs")  # Default log directory
+LOG_FILE_ADMIN = os.path.join(LOG_DIR, "admin_panel.log")
+MAX_LOG_SIZE_MB = 5  # Smaller size for admin panel maybe
+BACKUP_COUNT = 3
+
+
+def setup_logging(log_file_path: str) -> None:
+    """
+    Configures file-based rotating logging and stream logging.
+
+    Parameters
+    ----------
+    log_file_path : str
+        The full path to the log file.
+    """
+    log_formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(process)d - %(threadName)s - %(message)s"
+    )
+    log_level = logging.INFO
+
+    # Ensure log directory exists
+    os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
+
+    # Rotating File Handler
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file_path,
+        maxBytes=MAX_LOG_SIZE_MB * 1024 * 1024,
+        backupCount=BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(log_formatter)
+
+    # Stream Handler (for console output)
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(log_formatter)
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(stream_handler)
+
+    # Set library log levels if needed
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("streamlit").setLevel(logging.INFO)  # Keep streamlit info
+
+
+setup_logging(LOG_FILE_ADMIN)
 logger = logging.getLogger(__name__)
 
 

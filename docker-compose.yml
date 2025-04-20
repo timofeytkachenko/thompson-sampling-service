@@ -1,70 +1,81 @@
+networks:
+  app_network: # Define a custom network for services to communicate
+    driver: bridge
+
+volumes:
+  redis_data: # Volume for Redis persistence
+    driver: local
+  api_logs: # Volume for API logs
+    driver: local
+  admin_logs: # Volume for Admin Panel logs
+    driver: local
+
 services:
+  redis:
+    image: redis:7.4.2-alpine # Use official Alpine image for smaller size
+    container_name: thompson_redis
+    hostname: redis
+    command: redis-server --save 60 1 --loglevel warning # Persist data, reduce log noise
+    volumes:
+      - redis_data:/data # Mount volume for persistence
+    ports:
+      - "6379:6379" # Expose Redis port (optional, only if needed from host)
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
   api:
     build:
-      context: .
+      context: . # Assuming Dockerfile.api is in the same directory
       dockerfile: Dockerfile.api
-    container_name: thompson-sampling-api
-    ports:
-      - "8000:8000"
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - LOG_LEVEL=INFO
-    restart: unless-stopped
+    container_name: thompson_api
+    hostname: api
     depends_on:
-      redis:
+      redis: # Ensure Redis is healthy before starting API
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 5s
+    environment:
+      - REDIS_URL=redis://redis:6379/0 # Use service name 'redis'
+      - LOG_DIR=/app/logs # Ensure this matches Dockerfile and Python code
+      # Add any other necessary environment variables for the API
+    volumes:
+      - api_logs:/app/logs # Mount named volume for logs
+      # If you need live code reloading during development (mount source code):
+      # - ./app:/app # Mount local 'app' directory into container's /app
+    ports:
+      - "8000:8000" # Map container port 8000 to host port 8000
     networks:
-      - thompson-network
+      - app_network
+    # Healthcheck definition inherited from Dockerfile.api
+    restart: unless-stopped
 
   admin:
     build:
-      context: .
+      context: . # Assuming Dockerfile.admin is in the same directory
       dockerfile: Dockerfile.admin
-    container_name: thompson-admin-panel
-    ports:
-      - "8501:8501"
-    environment:
-      - API_BASE_URL=http://api:8000
-    restart: unless-stopped
+    container_name: thompson_admin
+    hostname: admin
     depends_on:
-      api:
+      api: # Ensure API is healthy before starting Admin panel
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 5s
-    networks:
-      - thompson-network
-
-  redis:
-    image: redis:7-alpine
-    container_name: thompson-redis
-    ports:
-      - "6379:6379"
+    environment:
+      - API_BASE_URL=http://api:8000 # Use service name 'api'
+      - LOG_DIR=/app/logs # Ensure this matches Dockerfile and Python code
+      - STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION=false # Often needed if behind proxy/load balancer
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+      # Add any other necessary environment variables for the Admin panel
     volumes:
-      - redis_data:/data
-    restart: unless-stopped
-    command: redis-server --appendonly yes
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 3
+      - admin_logs:/app/logs # Mount named volume for logs
+      # If you need live code reloading during development (mount source code):
+      # - ./app:/app # Mount local 'app' directory into container's /app
+    ports:
+      - "8501:8501" # Map container port 8501 to host port 8501
     networks:
-      - thompson-network
-
-volumes:
-  redis_data:
-    name: thompson-redis-data
-
-networks:
-  thompson-network:
-    name: thompson-network
+      - app_network
+    # Healthcheck definition inherited from Dockerfile.admin
+    restart: unless-stopped
